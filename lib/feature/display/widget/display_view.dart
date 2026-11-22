@@ -37,8 +37,9 @@ class _IframeViewState extends State<DisplayView>
   void initState() {
     super.initState();
 
-    // Prepare the iframe element once.
-    _iframeElement.src = _src;
+    // Prepare the iframe element once. Relative to the base href (/flutter/ in the
+    // shipped build), so the view keeps working when the app is not at the host root.
+    _iframeElement.src = "android.html";
     _iframeElement.style.border = 'none';
 
     ui.platformViewRegistry.registerViewFactory(

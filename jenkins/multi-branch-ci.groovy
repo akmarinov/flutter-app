@@ -53,7 +53,8 @@ pipeline {
                 script {
                     SENTRY_RELEASE = 'flutter-app-ci-' + getCurrentBranch()  + '-' + getCommitSha()
                 }
-                sh('fvm flutter build web --web-renderer html --no-web-resources-cdn')
+                // The app is served from /flutter/ on the device; the base href has to match.
+                sh('fvm flutter build web --web-renderer html --no-web-resources-cdn --base-href /flutter/')
                 // Unused with the html renderer; keeps ~19 MB out of the shipped zip.
                 sh('rm -rf build/web/canvaskit')
             }
