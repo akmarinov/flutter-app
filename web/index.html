@@ -59,10 +59,7 @@
     var loading = document.querySelector("#loading");
     _flutter.loader.load({
       onEntrypointLoaded: async function(engineInitializer) {
-        const appRunner = await engineInitializer.initializeEngine({
-          renderer: "canvaskit",
-          canvasKitBaseUrl: "/canvaskit/",
-        });
+        const appRunner = await engineInitializer.initializeEngine();
         window.setTimeout(function () { loading.remove(); }, 200);
         await appRunner.runApp();
       }
@@ -134,14 +131,14 @@
       };
 
       window.addEventListener('message', (e) => {
-        if (typeof e.data === 'string') {
-          try {
-            const maybe = JSON.parse(e.data);
-            if (maybe && typeof maybe === 'object' && 'audioWebsocketUrl' in maybe) {
-              window.setupAudioConfig(maybe);
-            }
-          } catch(_) {}
-        }
+        // Touch input also arrives as postMessage strings; only the audio config payload is JSON.
+        if (typeof e.data !== 'string' || e.data.indexOf('audioWebsocketUrl') === -1) return;
+        try {
+          const maybe = JSON.parse(e.data);
+          if (maybe && typeof maybe === 'object' && 'audioWebsocketUrl' in maybe) {
+            window.setupAudioConfig(maybe);
+          }
+        } catch(_) {}
       });
     })();
   </script>

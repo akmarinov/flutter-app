@@ -143,5 +143,11 @@ function drawDisplayFrame(arrayBuffer) {
   if (!worker) {
     return;
   }
+  if (arrayBuffer instanceof ArrayBuffer) {
+    // The socket buffer is not read again after this call, so hand ownership of
+    // it to the worker instead of letting postMessage structured-clone a copy.
+    worker.postMessage({ h264Data: arrayBuffer }, [arrayBuffer]);
+    return;
+  }
   worker.postMessage({ h264Data: arrayBuffer });
 }

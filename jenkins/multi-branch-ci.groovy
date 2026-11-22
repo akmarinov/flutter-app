@@ -54,6 +54,8 @@ pipeline {
                     SENTRY_RELEASE = 'flutter-app-ci-' + getCurrentBranch()  + '-' + getCommitSha()
                 }
                 sh('fvm flutter build web --web-renderer html --no-web-resources-cdn')
+                // Unused with the html renderer; keeps ~19 MB out of the shipped zip.
+                sh('rm -rf build/web/canvaskit')
             }
         }
         stage('Prepare artifacts') {

@@ -349,11 +349,6 @@
         }
       };
 
-      const rafCheck = () => {
-        onPotentialResize();
-        global.requestAnimationFrame(rafCheck);
-      };
-
       global.addEventListener("resize", onPotentialResize, { passive: true });
       global.addEventListener("orientationchange", onPotentialResize, { passive: true });
 
@@ -366,7 +361,12 @@
         });
       }
 
-      global.requestAnimationFrame(rafCheck);
+      if (typeof global.ResizeObserver === "function" && document.documentElement) {
+        // Catches layout-driven viewport changes that arrive without a window
+        // resize event, replacing a requestAnimationFrame poll loop.
+        const viewportObserver = new global.ResizeObserver(onPotentialResize);
+        viewportObserver.observe(document.documentElement);
+      }
     }
 
     _wireDialogEvents() {

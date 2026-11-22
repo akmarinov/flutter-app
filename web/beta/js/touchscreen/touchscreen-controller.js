@@ -39,11 +39,6 @@
       this._isRestarting = false;
     }
 
-    resetTouchscreen() {
-      this._resetLocalSlots();
-      this._resetTouchscreen();
-    }
-
     sendTouchScreenCommand(command) {
       const payload = String(command || "").replace(/^touchScreenCommand:/, "");
       if (!payload) {
@@ -153,30 +148,7 @@
 
       const onPointerUpOrCancel = (event) => {
         event.preventDefault();
-
-        if (!this._isSocketOpen()) {
-          this._resetLocalSlots();
-          return;
-        }
-
-        const slot = this._getSlotByTrackingId(event.pointerId);
-        if (!slot) {
-          return;
-        }
-
-        slot.trackingId = -1;
-
-        try {
-          this.touchLayer.releasePointerCapture(event.pointerId);
-        } catch (_error) {
-          // no-op
-        }
-
-        this._sendCommand({
-          absMtSlot: slot.slotIndex,
-          absMtTrackingId: -1,
-          synReport: true,
-        });
+        this._releasePointer(event);
       };
 
       this.touchLayer.addEventListener("pointerup", onPointerUpOrCancel, {
@@ -185,13 +157,42 @@
       this.touchLayer.addEventListener("pointercancel", onPointerUpOrCancel, {
         passive: false,
       });
+      // Touch pointers fire pointerleave right after pointerup, so only the
+      // pointer that left may be released: resetting every slot would cancel the
+      // other fingers of a pinch and send a 10-slot release on every single tap.
       this.touchLayer.addEventListener(
         "pointerleave",
-        () => {
-          this.resetTouchscreen();
+        (event) => {
+          this._releasePointer(event);
         },
         { passive: true },
       );
+    }
+
+    _releasePointer(event) {
+      if (!this._isSocketOpen()) {
+        this._resetLocalSlots();
+        return;
+      }
+
+      const slot = this._getSlotByTrackingId(event.pointerId);
+      if (!slot) {
+        return;
+      }
+
+      slot.trackingId = -1;
+
+      try {
+        this.touchLayer.releasePointerCapture(event.pointerId);
+      } catch (_error) {
+        // no-op
+      }
+
+      this._sendCommand({
+        absMtSlot: slot.slotIndex,
+        absMtTrackingId: -1,
+        synReport: true,
+      });
     }
 
     _createSlots() {

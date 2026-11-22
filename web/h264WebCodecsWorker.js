@@ -9,8 +9,14 @@ let pendingFrames = [],
     windowWidth,
     ctx;
 
-const MAX_BUFFER_SIZE = 50;
+const MAX_BUFFER_SIZE = 4;
+const MAX_DECODE_QUEUE_SIZE = 8;
 const MAX_TEXTURE_POOL_SIZE = 5;
+const STATS_INTERVAL_MS = 1000;
+
+let dropDeltaUntilKeyframe = false;
+let skippedFrames = 0;
+let lastStatsTime = 0;
 
 const texturePool = [];
 
@@ -63,43 +69,97 @@ function drawImageToCanvas(gl, image) {
     }
 }
 
-function videoMagic(dat) {
-    let unittype = (dat[4] & 0x1f);
-    if (unittype === 1) {
-        let chunk = new EncodedVideoChunk({
-            type: 'delta',
-            timestamp: 0,
-            duration: 0,
-            data: dat
-        });
-        if (decoder.state === 'configured') {
-            decoder.decode(chunk);
-        } else {
-            self.postMessage({ error: true });
-        }
+function nalHeaderOffset(bytes) {
+    if (!bytes || bytes.length < 3) {
+        return -1;
+    }
+    if (bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x00 && bytes.length > 3 && bytes[3] === 0x01) {
+        return 4;
+    }
+    if (bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01) {
+        return 3;
+    }
+    return -1;
+}
+
+function nalType(bytes) {
+    const offset = nalHeaderOffset(bytes);
+    if (offset < 0 || offset >= bytes.length) {
+        return -1;
+    }
+    return bytes[offset] & 0x1f;
+}
+
+function decodeBacklogged() {
+    if (pendingFrames.length > MAX_BUFFER_SIZE) {
+        return true;
+    }
+    return !!decoder && typeof decoder.decodeQueueSize === 'number' &&
+        decoder.decodeQueueSize > MAX_DECODE_QUEUE_SIZE;
+}
+
+function decodeNal(dat, isKey) {
+    if (!decoder || decoder.state !== 'configured') {
+        self.postMessage({ error: true });
         return;
     }
 
-    if (unittype === 5) {
-        let data = appendByteArray(sps, dat);
+    if (!isKey && (dropDeltaUntilKeyframe || decodeBacklogged())) {
+        // Deltas are only decodable after the next keyframe, so drop them all until one arrives.
+        dropDeltaUntilKeyframe = true;
+        skippedFrames++;
+        return;
+    }
 
-        let chunk = new EncodedVideoChunk({
-            type: 'key',
-            timestamp: 0,
-            duration: 0,
-            data: data
-        });
-        if (decoder.state === 'configured') {
-            decoder.decode(chunk);
-        } else {
+    let data = dat;
+    if (isKey) {
+        if (!sps) {
             self.postMessage({ error: true });
+            return;
         }
+        data = appendByteArray(sps, dat);
+    }
+
+    const chunk = new EncodedVideoChunk({
+        type: isKey ? 'key' : 'delta',
+        timestamp: 0,
+        duration: 0,
+        data: data
+    });
+
+    try {
+        decoder.decode(chunk);
+        if (isKey) {
+            dropDeltaUntilKeyframe = false;
+        }
+    } catch (e) {
+        if (!isKey) {
+            dropDeltaUntilKeyframe = true;
+        }
+        self.postMessage({ error: true });
     }
 }
+
+function videoMagic(dat) {
+    const unittype = nalType(dat);
+
+    if (unittype === 1) {
+        decodeNal(dat, false);
+    } else if (unittype === 5) {
+        decodeNal(dat, true);
+    }
+}
+
 function headerMagic(dat) {
-    let unittype = (dat[4] & 0x1f);
+    const offset = nalHeaderOffset(dat);
+    const unittype = nalType(dat);
 
     if (unittype === 7) {
+        if (dat.length < offset + 4) {
+            self.postMessage({ error: true });
+            return;
+        }
+
         let config = {
             codec: "avc1.",
             codedHeight: height,
@@ -109,20 +169,26 @@ function headerMagic(dat) {
             hardwareAcceleration: "prefer-hardware",
             optimizeForLatency: true
         }
-        for (let i = 5; i < 8; ++i) {
+        for (let i = offset + 1; i < offset + 4; ++i) {
             var h = dat[i].toString(16);
             if (h.length < 2) {
                 h = '0' + h;
             }
             config.codec += h;
         }
-        sps = dat;
-        decoder.configure(config);
+        // Copy so a retained SPS doesn't pin the whole message buffer.
+        sps = dat.slice();
+        dropDeltaUntilKeyframe = true;
+        try {
+            decoder.configure(config);
+        } catch (e) {
+            self.postMessage({ error: e });
+        }
 
         return;
     }
     else if (unittype === 8)
-        sps = appendByteArray(sps, dat)
+        sps = sps ? appendByteArray(sps, dat) : dat.slice()
     else
         videoMagic(dat);
 }
@@ -134,49 +200,73 @@ function appendByteArray(buffer1, buffer2) {
     return tmp;
 }
 
-function separateNalUnits(data) {
-    let i = -1;
-    return new Uint8Array(data)
-        .reduce((output, value, index, self) => {
-            if (value === 0 && self[index + 1] === 0 && self[index + 2] === 0 && self[index + 3] === 1) {
-                i++;
-            }
-            if (!output[i]) {
-                output[i] = [];
-            }
-            output[i].push(value);
-            return output;
-        }, [])
-        .map(dat => Uint8Array.from(dat));
-}
-
-let skippedFrames = 0;
-
-function handleMessage(dat) {
-    let unittype = (dat[4] & 0x1f);
-
-    if (unittype === 1 || unittype === 5) {
-        videoMagic(dat)
-    } else {
-        separateNalUnits(dat).forEach(headerMagic)
+// Splits Annex-B access units by start code, without copying bytes.
+function separateNalUnits(bytes) {
+    const units = [];
+    if (!bytes || bytes.length < 4) {
+        return units;
     }
 
-    if (pendingFrames.length > MAX_BUFFER_SIZE) {
-        let foundIframe = false;
-        while (!foundIframe && pendingFrames.length > 0) {
-            let frame = pendingFrames.shift();
-            if (frame.type === 'key') {
-                foundIframe = true;
-                pendingFrames.unshift(frame);
-            } else {
-                skippedFrames++;
-            }
+    let currentStart = -1;
+    let index = 0;
+
+    while (index <= bytes.length - 4) {
+        let codeLength = 0;
+        if (bytes[index] === 0x00 && bytes[index + 1] === 0x00 &&
+            bytes[index + 2] === 0x00 && bytes[index + 3] === 0x01) {
+            codeLength = 4;
+        } else if (bytes[index] === 0x00 && bytes[index + 1] === 0x00 && bytes[index + 2] === 0x01) {
+            codeLength = 3;
+        }
+
+        if (codeLength === 0) {
+            index += 1;
+            continue;
+        }
+
+        if (currentStart >= 0 && index > currentStart) {
+            units.push(bytes.subarray(currentStart, index));
+        }
+        currentStart = index;
+        index += codeLength;
+    }
+
+    if (currentStart >= 0 && currentStart < bytes.length) {
+        units.push(bytes.subarray(currentStart));
+    }
+
+    return units;
+}
+
+function handleMessage(data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+
+    const units = separateNalUnits(bytes);
+    for (let i = 0; i < units.length; ++i) {
+        headerMagic(units[i]);
+    }
+
+    trimPendingFrames();
+}
+
+function trimPendingFrames() {
+    // pendingFrames holds already-decoded frames, so dropping the oldest never breaks decoding.
+    while (pendingFrames.length > MAX_BUFFER_SIZE) {
+        const frame = pendingFrames.shift();
+        if (frame && frame.close) {
             frame.close();
         }
+        skippedFrames++;
     }
 }
 
 function sendStatsToMainThread() {
+    const now = Date.now();
+    if (now - lastStatsTime < STATS_INTERVAL_MS) {
+        return;
+    }
+    lastStatsTime = now;
+
     const stats = {
         skippedFrames: skippedFrames,
         bufferLength: pendingFrames.length,
